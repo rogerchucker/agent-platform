@@ -29,8 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from control_plane.client import ControlPlaneClient
 
 CP = os.environ.get("CONTROL_PLANE", "http://sre-control-plane")
-RESPONDER = "oncall-responder"
-APPROVER = "oncall-operator"
+# Reuse the canonical agents (the always-on access broker, and the incident
+# responder) when they're already active, instead of creating throwaways.
+RESPONDER = os.environ.get("RESPONDER_ID", "devops-incident-responder")
+APPROVER = os.environ.get("APPROVER_ID", "devops-access-broker")
 SKILL_SUBJECT = "system:serviceaccount:agent-requester:requester"
 SKILL, ACTION = "pci-k8s-runbooks", "use"
 RUNTIME = {"kind": "cloud", "cluster": "local-dev"}
@@ -63,24 +65,41 @@ async def incy_status(cp: ControlPlaneClient, iid: str) -> str:
         return "?"
 
 
+async def ensure_agent(cp: ControlPlaneClient, agent_id: str, *, name: str, kind: str,
+                       trust: str, target: str, capabilities: list, subs: list) -> bool:
+    """Reuse the agent if it's already active on the platform; otherwise register
+    it (and leave it — we don't tear these down). Returns True if reused."""
+    try:
+        r = await cp._http.get(f"/agents/{agent_id}")
+        status = r.json().get("status") if r.status_code == 200 else None
+    except Exception:
+        status = None
+    if status in ("live", "inactive"):
+        cp.agent_id = agent_id
+        try:  # nudge liveness for the duration of the demo
+            await cp._http.post(f"/agents/{agent_id}/heartbeat")
+        except Exception:
+            pass
+        say(f"{DIM}[setup]{X}", f"reusing active agent {B}{agent_id}{X} (status={status})")
+        return True
+    await cp.register(
+        name=name, kind=kind, agent_id=agent_id, capabilities=capabilities, subscriptions=subs,
+        identity={"owner_principal": "rajarshic@gmail.com", "trust_level": trust,
+                  "allowed_envs": ["dev"], "framework": "custom", "target_application": target,
+                  "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]})
+    say(f"{DIM}[setup]{X}", f"registered {B}{agent_id}{X} (was not active)")
+    return False
+
+
 async def main() -> int:
     async with ControlPlaneClient(CP) as responder, ControlPlaneClient(CP) as approver:
-        # ---- setup: two identities (the SRE agent, and the on-call approver) ----
-        await responder.register(
-            name="On-call Responder", kind="incident-responder", agent_id=RESPONDER,
-            capabilities=["triage", "runbook-exec"], subscriptions=["incidents"],
-            identity={"owner_principal": "rajarshic@gmail.com", "trust_level": "low",
-                      "allowed_envs": ["dev"], "framework": "custom",
-                      "target_application": "incident-response",
-                      "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]})
-        await approver.register(
-            name="On-call Engineer (approver)", kind="approver", agent_id=APPROVER,
-            capabilities=["skill-approval"],
-            identity={"owner_principal": "rajarshic@gmail.com", "trust_level": "high",
-                      "allowed_envs": ["dev"], "framework": "custom",
-                      "target_application": "access-approver",
-                      "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]})
-        say(f"{DIM}[setup]{X}", f"responder + on-call approver registered (IdP-provisioned)")
+        # ---- setup: reuse the canonical responder + access broker if active ----
+        await ensure_agent(responder, RESPONDER, name="DevOps Incident Responder",
+                           kind="incident-responder", trust="low", target="incident-response",
+                           capabilities=["triage", "runbook-exec"], subs=["incidents"])
+        await ensure_agent(approver, APPROVER, name="DevOps Access Broker",
+                           kind="approver", trust="high", target="access-broker",
+                           capabilities=["skill-approval"], subs=["access.requests"])
 
         # ---- 1. a SEV0 fires in Incy ----
         summary = f"Checkout pods CrashLoopBackOff in CDE ({uuid.uuid4().hex[:4]})"
@@ -103,7 +122,7 @@ async def main() -> int:
         if iid:
             await responder.publish("incidents", {
                 "kind": "status", "incident_id": iid, "status": "investigating",
-                "agent_id": responder.agent_id, "agent_name": "On-call Responder",
+                "agent_id": responder.agent_id, "agent_name": "DevOps Incident Responder",
                 "note": f"Picked up for {ticket} — investigating root cause"})
             await asyncio.sleep(3)
             say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} (INVESTIGATING, picked up by agent)")
@@ -155,17 +174,13 @@ async def main() -> int:
         if iid:
             await responder.publish("incidents", {
                 "kind": "status", "incident_id": iid, "status": "closed",
-                "agent_id": responder.agent_id, "agent_name": "On-call Responder",
+                "agent_id": responder.agent_id, "agent_name": "DevOps Incident Responder",
                 "note": f"{outcome}; closing {ticket}"})
             await asyncio.sleep(3)
             say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} (CLOSED)  outcome: {outcome}")
 
-        # cleanup
-        for aid in (RESPONDER, APPROVER):
-            try:
-                await responder.delete_agent(aid, hard=True)
-            except Exception:
-                pass
+        # No teardown: these are the canonical, reused agents — leave them in place
+        # for the next run (and so the always-on broker keeps serving).
         print(f"\n{G}done.{X}")
         return 0
 

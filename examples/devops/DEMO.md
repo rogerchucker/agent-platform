@@ -33,6 +33,10 @@ CONTROL_PLANE=http://sre-control-plane python -u examples/devops/demo_interactiv
 This runs the whole incident as a single linear narration and **pauses for a real
 `[y/N]` decision** at the approval moment — you, the on-call, approve or deny in
 the same flow. `AUTO_APPROVE=y` (or `n`) runs it non-interactively for CI/smoke.
+
+It **reuses the canonical agents** when they're already active (the always-on
+`devops-access-broker`, and `devops-incident-responder`), registering them only
+if missing, and never tears them down — so repeated runs don't spawn throwaways.
 Both branches are real: approve → skill granted + guarded gateway remediation +
 Incy resolved; deny → limited triage only.
 
