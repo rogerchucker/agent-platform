@@ -279,6 +279,10 @@ async def deregister_agent(agent_id: str, hard: bool = False):
             idp_result = await idp.delete_agent(agent_id, hard=hard)
         except IdPError as exc:
             idp_result = {"error": f"{exc.status}: {exc.detail}"}
+    # Hard delete removes the local tombstone too, so the id is reusable; a soft
+    # delete keeps a DEREGISTERED record (prevents silent id reuse).
+    if hard:
+        await registry.remove(agent_id)
     return {"ok": True, "idp": idp_result}
 
 

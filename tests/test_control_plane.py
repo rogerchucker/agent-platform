@@ -118,3 +118,16 @@ async def test_clone_creates_fresh_independent_agent():
         await reg.clone("src", new_id="clone")
     # missing source returns None
     assert await reg.clone("nope", new_id="z") is None
+
+
+@pytest.mark.asyncio
+async def test_hard_remove_frees_agent_id():
+    reg = AgentRegistry()
+    await reg.register(RegisterRequest(name="x", agent_id="reuse-me"))
+    assert await reg.deregister("reuse-me")          # soft: tombstone remains
+    assert reg.get("reuse-me") is not None
+    assert await reg.remove("reuse-me")              # hard: gone
+    assert reg.get("reuse-me") is None
+    # id is now reusable
+    again = await reg.register(RegisterRequest(name="x2", agent_id="reuse-me"))
+    assert again.agent_id == "reuse-me"

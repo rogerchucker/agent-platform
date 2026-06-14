@@ -112,11 +112,55 @@ class ControlPlaneClient:
         resp.raise_for_status()
         return resp.json()["agents"]
 
-    async def get_identity(self) -> dict:
-        """The IdP record provisioned for this agent."""
-        resp = await self._http.get(f"/agents/{self.agent_id}/identity")
+    async def get_identity(self, agent_id: Optional[str] = None) -> dict:
+        """The IdP record provisioned for an agent (defaults to self)."""
+        resp = await self._http.get(f"/agents/{agent_id or self.agent_id}/identity")
         resp.raise_for_status()
         return resp.json()
+
+    async def clone_agent(
+        self,
+        source_agent_id: str,
+        new_agent_id: Optional[str] = None,
+        name: Optional[str] = None,
+        clone_bindings: bool = False,
+        owner_principal: Optional[str] = None,
+    ) -> dict:
+        """Fork an agent into a new one (fresh identity). clone_bindings=True makes
+        a replica that shares the source's workload identity (scale-out); the
+        default is an independent clone that must bind its own runtime."""
+        body: dict[str, Any] = {"clone_bindings": clone_bindings}
+        if new_agent_id is not None:
+            body["new_agent_id"] = new_agent_id
+        if name is not None:
+            body["name"] = name
+        if owner_principal is not None:
+            body["owner_principal"] = owner_principal
+        resp = await self._http.post(f"/agents/{source_agent_id}/clone", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def delete_agent(self, agent_id: str, hard: bool = False) -> dict:
+        """Decommission an agent: deregisters locally and tears down the IdP
+        identity (revoke grants/tokens/skill-grants + disable, or hard-delete)."""
+        resp = await self._http.request(
+            "DELETE", f"/agents/{agent_id}", params={"hard": str(hard).lower()}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def try_attest(self, agent_id: str, runtime: dict[str, Any], env: str = "dev") -> tuple[int, dict]:
+        """Attempt an attestation/token exchange for an arbitrary agent id WITHOUT
+        raising — returns (status, body). Used to prove a decommissioned agent can
+        no longer act (expect 403 agent_disabled)."""
+        resp = await self._http.post(
+            f"/agents/{agent_id}/identity/token",
+            json={"env": env, "runtime": runtime, "session_id": "probe", "trace_id": "probe"},
+        )
+        try:
+            return resp.status_code, resp.json()
+        except Exception:
+            return resp.status_code, {}
 
     async def _heartbeat_loop(self) -> None:
         while True:

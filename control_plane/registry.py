@@ -94,6 +94,12 @@ class AgentRegistry:
             agent.connected = False
             return True
 
+    async def remove(self, agent_id: str) -> bool:
+        """Hard-remove an agent from the registry (no tombstone). Used by a hard
+        delete so the agent_id becomes reusable."""
+        async with self._lock:
+            return self._agents.pop(agent_id, None) is not None
+
     async def heartbeat(self, agent_id: str) -> Optional[Agent]:
         async with self._lock:
             agent = self._agents.get(agent_id)
