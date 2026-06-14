@@ -31,7 +31,11 @@ from control_plane.client import ControlPlaneClient
 CP = os.environ.get("CONTROL_PLANE", "http://sre-control-plane")
 RUNTIME = {"kind": "cloud", "cluster": "local-dev"}
 
-BASE = "demo-responder"
+# Clone SOURCE: reuse the canonical responder if it's running (don't spawn a
+# throwaway), falling back to a temp agent only when running standalone.
+CANONICAL_BASE = os.environ.get("BASE_AGENT", "devops-incident-responder")
+FALLBACK_BASE = "demo-responder"
+# The two demonstration clones (inherent to a clone demo) — always cleaned up.
 REPLICA = "demo-responder-surge"
 FORK = "demo-responder-fork"
 
@@ -53,29 +57,36 @@ def step(n: int, title: str) -> None:
 async def main() -> int:
     async with ControlPlaneClient(CP) as op:
         print(f"{DIM}control plane: {CP}{X}")
-        # Clean slate from any prior run (best-effort hard delete).
-        for aid in (REPLICA, FORK, BASE):
+        # Clean up only the demonstration clones from a prior run (NOT any base).
+        for aid in (REPLICA, FORK):
             try:
                 await op.delete_agent(aid, hard=True)
             except Exception:
                 pass
 
-        step(1, "Register a base incident-responder (provisions an IdP identity)")
-        agent = await op.register(
-            name="Demo Responder", kind="incident-responder", agent_id=BASE,
-            capabilities=["triage", "runbook-exec"], subscriptions=["incidents"],
-            identity={"owner_principal": "rajarshic@gmail.com", "trust_level": "low",
-                      "allowed_envs": ["dev"], "framework": "custom",
-                      "target_application": "incident-response",
-                      "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]},
-            auto_heartbeat=False,
-        )
-        check("base provisioned in IdP", agent.get("idp_provisioned") is True)
-        st, _ = await op.try_attest(BASE, RUNTIME)
+        step(1, "Pick the clone source (reuse the canonical responder if present)")
+        created_base = False
+        r = await op._http.get(f"/agents/{CANONICAL_BASE}")
+        if r.status_code == 200:
+            base = CANONICAL_BASE
+            print(f"    reusing existing agent {C}{base}{X} as the clone source (won't be deleted)")
+        else:
+            base = FALLBACK_BASE
+            created_base = True
+            await op.register(
+                name="Demo Responder", kind="incident-responder", agent_id=base,
+                capabilities=["triage", "runbook-exec"], subscriptions=["incidents"],
+                identity={"owner_principal": "rajarshic@gmail.com", "trust_level": "low",
+                          "allowed_envs": ["dev"], "framework": "custom",
+                          "target_application": "incident-response",
+                          "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]},
+                auto_heartbeat=False)
+            print(f"    no '{CANONICAL_BASE}' found — created temp base {C}{base}{X} (standalone mode)")
+        st, _ = await op.try_attest(base, RUNTIME)
         check("base can attest & act", st == 200, f"token exchange → HTTP {st}")
 
         step(2, "CLONE as a replica (scale-out) — shares the workload identity")
-        rep = await op.clone_agent(BASE, new_agent_id=REPLICA, clone_bindings=True,
+        rep = await op.clone_agent(base, new_agent_id=REPLICA, clone_bindings=True,
                                    name="Surge Responder")
         check("replica is a fresh, provisioned identity",
               rep["agent_id"] == REPLICA and rep.get("idp_provisioned") is True)
@@ -83,7 +94,7 @@ async def main() -> int:
         check("replica can attest & act immediately", st == 200, f"token exchange → HTTP {st}")
 
         step(3, "CLONE independent (the default) — no binding, must be bound first")
-        fork = await op.clone_agent(BASE, new_agent_id=FORK)  # clone_bindings=False
+        fork = await op.clone_agent(base, new_agent_id=FORK)  # clone_bindings=False
         ident = await op.get_identity(FORK)
         check("independent clone has NO runtime bindings",
               ident.get("runtime_bindings") == [], f"bindings={ident.get('runtime_bindings')}")
@@ -104,14 +115,20 @@ async def main() -> int:
               ident.get("status") == "disabled", f"status={ident.get('status')}")
 
         step(5, "The base agent is untouched and still acts")
-        st, _ = await op.try_attest(BASE, RUNTIME)
+        st, _ = await op.try_attest(base, RUNTIME)
         check("base still attests & acts", st == 200, f"token exchange → HTTP {st}")
 
-        # Cleanup — hard-delete everything we created (REPLICA was only soft-deleted
-        # in step 4) so repeat runs start clean and ids are reusable.
-        for aid in (REPLICA, FORK, BASE):
+        # Cleanup — hard-delete only the demonstration clones (REPLICA was only
+        # soft-deleted in step 4). The base is deleted ONLY if we created it; the
+        # canonical responder is left running untouched.
+        for aid in (REPLICA, FORK):
             try:
                 await op.delete_agent(aid, hard=True)
+            except Exception:
+                pass
+        if created_base:
+            try:
+                await op.delete_agent(base, hard=True)
             except Exception:
                 pass
 
