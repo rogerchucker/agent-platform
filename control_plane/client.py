@@ -178,8 +178,16 @@ class ControlPlaneClient:
 
     # -- message queue (WebSocket stream) --------------------------------
     async def listen(self, topics: list[str]) -> AsyncIterator[dict]:
-        """Yield incoming messages over a WebSocket. Heartbeats handled inline."""
-        import websockets
+        """Yield incoming messages over a WebSocket. Heartbeats handled inline.
+        Returns (the async-for ends) when the server closes the stream — use
+        ``listen_resilient`` for a long-lived agent that should reconnect."""
+        try:
+            import websockets
+        except ModuleNotFoundError as exc:  # clearer than a bare import error mid-run
+            raise RuntimeError(
+                "the 'websockets' package is required to listen(); "
+                "install deps (pip install -r requirements.txt) or run via `uv run --with websockets`."
+            ) from exc
 
         ws_url = self.base_url.replace("http", "ws", 1) + f"/ws/{self.agent_id}"
         ws_url += "?topics=" + ",".join(topics)
@@ -197,6 +205,25 @@ class ControlPlaneClient:
                         yield frame
             finally:
                 beat_task.cancel()
+
+    async def listen_resilient(self, topics: list[str], retry_delay: float = 2.0) -> AsyncIterator[dict]:
+        """Like ``listen`` but transparently reconnects when the stream drops, so
+        a long-lived agent (e.g. an approver waiting for requests) survives idle
+        WebSocket resets or a brief control-plane restart instead of exiting.
+        The REST heartbeat keeps the agent registered across reconnects."""
+        while True:
+            try:
+                async for frame in self.listen(topics):
+                    yield frame
+                # listen() returned → server closed the stream cleanly.
+                print(f"[sdk] control-plane stream closed; reconnecting in {retry_delay:.0f}s…",
+                      flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[sdk] stream error ({type(exc).__name__}: {exc}); "
+                      f"reconnecting in {retry_delay:.0f}s…", flush=True)
+            await asyncio.sleep(retry_delay)
 
     # -- identity & authorization (brokered to the IdP) ------------------
     async def get_access_token(

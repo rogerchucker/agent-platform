@@ -107,7 +107,9 @@ async def main():
         )
         print(f"registered {agent['agent_id']} (idp_provisioned={agent['idp_provisioned']})")
         print(f"listening for escalation requests on '{REQUESTS_TOPIC}' …")
-        async for msg in cp.listen([REQUESTS_TOPIC]):
+        # listen_resilient reconnects on WebSocket drops so the approver stays up
+        # while idle waiting for requests (instead of exiting when the stream ends).
+        async for msg in cp.listen_resilient([REQUESTS_TOPIC]):
             try:
                 await handle_request(cp, msg["payload"])
             except Exception as exc:

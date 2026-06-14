@@ -157,7 +157,7 @@ async def main():
         )
         print(f"registered {agent['agent_id']} (idp_provisioned={agent['idp_provisioned']})")
         print(f"listening for incy incidents on '{INCIDENTS_TOPIC}' …")
-        async for msg in cp.listen([INCIDENTS_TOPIC, GRANTS_TOPIC]):
+        async for msg in cp.listen_resilient([INCIDENTS_TOPIC, GRANTS_TOPIC]):
             payload = msg["payload"]
             if msg["topic"] == INCIDENTS_TOPIC and payload.get("kind") == "incident":
                 # handle concurrently so one slow investigation doesn't block others
