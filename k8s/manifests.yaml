@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-control-plane
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: sre-control-plane
+  labels:
+    app: control-plane
+spec:
+  # In-memory state (registry + queue) lives in the process, so a single
+  # replica is the correct default. Scale-out needs Redis/NATS backing first.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-plane
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      imagePullSecrets:
+        - name: registry-raj-agent-idp
+      containers:
+        - name: control-plane
+          image: registry.digitalocean.com/raj-agent-idp/agent-idp:sre-control-plane-0.5.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            # IdP integration: registration provisions an identity, and the
+            # control plane brokers all identity calls (keys never reach agents).
+            - name: IDP_BASE_URL
+              value: http://agent-idp.agent-idp.svc.cluster.local
+            - name: IDP_ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: idp-credentials
+                  key: IDP_ADMIN_API_KEY
+            - name: IDP_INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: idp-credentials
+                  key: IDP_INTERNAL_API_KEY
+            # incy connector: bridges incy incidents <-> the 'incidents' topic.
+            - name: INCY_BASE_URL
+              value: http://incy-api.incy.svc.cluster.local:8000
+            - name: INCY_INTEGRATION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: incy-credentials
+                  key: INCY_INTEGRATION_KEY
+            - name: INCY_AGENT_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: incy-credentials
+                  key: INCY_AGENT_USER_ID
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: sre-control-plane
+  labels:
+    app: control-plane
+spec:
+  # ClusterIP only — no public exposure. Reached via the Tailscale sidecar
+  # (k8s/tailscale.yaml) over the tailnet, or in-cluster by other agents.
+  type: ClusterIP
+  selector:
+    app: control-plane
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

@@ -1,0 +1,109 @@
+# Exposes the control plane (and its message queue — same HTTP/WS service on
+# port 80) onto the tailnet, mirroring the agent-idp / incy ts-proxy pattern.
+# Result: a tailnet node "sre-control-plane" reachable at http://sre-control-plane/
+#
+# Requires a Tailscale auth key in secret `tailscale-authkey` (key: authkey):
+#   kubectl -n sre-control-plane create secret generic tailscale-authkey \
+#     --from-literal=authkey=tskey-auth-xxxxx
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-control-plane-ts-proxy
+  namespace: sre-control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-control-plane-ts-proxy
+  namespace: sre-control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sre-control-plane-ts-proxy
+  namespace: sre-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sre-control-plane-ts-proxy
+subjects:
+  - kind: ServiceAccount
+    name: sre-control-plane-ts-proxy
+    namespace: sre-control-plane
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-control-plane-ts-serve
+  namespace: sre-control-plane
+data:
+  # Raw TCP forward of tailnet port 80 -> in-cluster control-plane service.
+  # Carries both REST and WebSocket (the message queue) transparently.
+  serve.json: |
+    {
+      "TCP": {
+        "80": { "TCPForward": "control-plane.sre-control-plane.svc.cluster.local:80" }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-control-plane-ts-proxy
+  namespace: sre-control-plane
+  labels:
+    app: sre-control-plane-ts-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sre-control-plane-ts-proxy
+  template:
+    metadata:
+      labels:
+        app: sre-control-plane-ts-proxy
+    spec:
+      serviceAccountName: sre-control-plane-ts-proxy
+      containers:
+        - name: tailscale
+          image: tailscale/tailscale:stable
+          env:
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_KUBE_SECRET
+              value: tailscale-state
+            - name: TS_HOSTNAME
+              value: sre-control-plane
+            - name: TS_SERVE_CONFIG
+              value: /etc/tsconfig/serve.json
+            # Consumed on first login; ignored once node state is persisted.
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: tailscale-authkey
+                  key: authkey
+                  optional: true
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: serve-config
+              mountPath: /etc/tsconfig
+              readOnly: true
+      volumes:
+        - name: serve-config
+          configMap:
+            name: sre-control-plane-ts-serve

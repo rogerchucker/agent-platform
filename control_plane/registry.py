@@ -1,0 +1,123 @@
+"""Agent registry: registration, heartbeats, and liveness.
+
+An agent is LIVE while it heartbeats (or holds an open WebSocket) within
+``heartbeat_timeout`` seconds. A background sweeper flips silent agents to
+INACTIVE so the dashboard reflects reality without the agent doing anything.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Optional
+
+from .models import Agent, AgentStatus, RegisterRequest
+
+
+class AgentRegistry:
+    def __init__(self, heartbeat_timeout: float = 30.0, sweep_interval: float = 5.0):
+        self.heartbeat_timeout = heartbeat_timeout
+        self.sweep_interval = sweep_interval
+        self._agents: dict[str, Agent] = {}
+        self._lock = asyncio.Lock()
+        self._sweeper: Optional[asyncio.Task] = None
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self) -> None:
+        if self._sweeper is None or self._sweeper.done():
+            self._sweeper = asyncio.create_task(self._sweep_loop())
+
+    async def stop(self) -> None:
+        if self._sweeper:
+            self._sweeper.cancel()
+            try:
+                await self._sweeper
+            except asyncio.CancelledError:
+                pass
+            self._sweeper = None
+
+    # -- registration ------------------------------------------------------
+    async def register(self, req: RegisterRequest) -> Agent:
+        async with self._lock:
+            # Idempotent re-registration: reuse the id if the agent supplies one
+            # it has used before (e.g. after a restart).
+            if req.agent_id and req.agent_id in self._agents:
+                agent = self._agents[req.agent_id]
+                agent.name = req.name
+                agent.kind = req.kind
+                agent.capabilities = req.capabilities
+                agent.subscriptions = req.subscriptions
+                agent.metadata = req.metadata
+                agent.status = AgentStatus.LIVE
+                agent.last_heartbeat = time.time()
+                return agent
+
+            agent = Agent(
+                name=req.name,
+                kind=req.kind,
+                capabilities=req.capabilities,
+                subscriptions=req.subscriptions,
+                metadata=req.metadata,
+            )
+            if req.agent_id:
+                agent.agent_id = req.agent_id
+            self._agents[agent.agent_id] = agent
+            return agent
+
+    async def deregister(self, agent_id: str) -> bool:
+        async with self._lock:
+            agent = self._agents.get(agent_id)
+            if not agent:
+                return False
+            agent.status = AgentStatus.DEREGISTERED
+            agent.connected = False
+            return True
+
+    async def heartbeat(self, agent_id: str) -> Optional[Agent]:
+        async with self._lock:
+            agent = self._agents.get(agent_id)
+            if not agent or agent.status == AgentStatus.DEREGISTERED:
+                return None
+            agent.last_heartbeat = time.time()
+            agent.status = AgentStatus.LIVE
+            return agent
+
+    async def set_connected(self, agent_id: str, connected: bool) -> None:
+        async with self._lock:
+            agent = self._agents.get(agent_id)
+            if not agent:
+                return
+            agent.connected = connected
+            if connected:
+                agent.last_heartbeat = time.time()
+                agent.status = AgentStatus.LIVE
+
+    # -- queries -----------------------------------------------------------
+    def get(self, agent_id: str) -> Optional[Agent]:
+        return self._agents.get(agent_id)
+
+    def list(self, include_deregistered: bool = False) -> list[Agent]:
+        agents = list(self._agents.values())
+        if not include_deregistered:
+            agents = [a for a in agents if a.status != AgentStatus.DEREGISTERED]
+        return sorted(agents, key=lambda a: a.registered_at)
+
+    # -- internals ---------------------------------------------------------
+    def _evaluate(self, agent: Agent, now: float) -> None:
+        if agent.status == AgentStatus.DEREGISTERED:
+            return
+        # An open WebSocket counts as live regardless of REST heartbeats.
+        if agent.connected:
+            agent.status = AgentStatus.LIVE
+            return
+        if agent.seconds_since_heartbeat(now) > self.heartbeat_timeout:
+            agent.status = AgentStatus.INACTIVE
+        else:
+            agent.status = AgentStatus.LIVE
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.sweep_interval)
+            now = time.time()
+            async with self._lock:
+                for agent in self._agents.values():
+                    self._evaluate(agent, now)

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SRE Agent Control Plane</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --line: #232838; --muted: #7d8799;
+    --text: #e6e9ef; --live: #2ecc71; --inactive: #e67e22; --dead: #5b6172;
+    --accent: #4ea1ff; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 14px; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--live);
+                box-shadow: 0 0 8px var(--live); }
+  .meta { color: var(--muted); font-size: 12px; margin-left: auto; font-family: var(--mono); }
+  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; padding: 16px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           overflow: hidden; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px;
+              color: var(--muted); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 500; }
+  td.name { font-weight: 600; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+           padding: 2px 9px; border-radius: 999px; font-weight: 600; }
+  .badge .b { width: 7px; height: 7px; border-radius: 50%; }
+  .live { color: var(--live); background: rgba(46,204,113,.12); }
+  .live .b { background: var(--live); }
+  .inactive { color: var(--inactive); background: rgba(230,126,34,.12); }
+  .inactive .b { background: var(--inactive); }
+  .deregistered { color: var(--dead); background: rgba(91,97,114,.15); }
+  .deregistered .b { background: var(--dead); }
+  .chip { font-family: var(--mono); font-size: 11px; background: #1b2130; color: #aeb6c6;
+          padding: 1px 7px; border-radius: 5px; margin-right: 4px; display: inline-block; }
+  .feed { max-height: 70vh; overflow-y: auto; }
+  .msg { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .msg .top { display: flex; gap: 8px; align-items: baseline; }
+  .msg .topic { color: var(--accent); font-family: var(--mono); font-size: 12px; font-weight: 600; }
+  .msg .from { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-left: auto; }
+  .msg pre { margin: 6px 0 0; font-family: var(--mono); font-size: 11.5px; color: #c8cedb;
+             white-space: pre-wrap; word-break: break-word; }
+  .empty { padding: 24px 16px; color: var(--muted); text-align: center; }
+  .stat { display: inline-block; margin-right: 18px; }
+  .stat b { color: var(--text); font-size: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="conn-dot"></span>
+  <h1>SRE Agent Control Plane</h1>
+  <span class="meta" id="summary">loading…</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Registered Agents</h2>
+    <table>
+      <thead><tr><th>Name</th><th>Status</th><th>Kind</th><th>Capabilities</th><th>Last seen</th></tr></thead>
+      <tbody id="agents"><tr><td colspan="5" class="empty">No agents registered yet.</td></tr></tbody>
+    </table>
+  </section>
+  <section class="panel">
+    <h2>Message Queue — recent</h2>
+    <div class="feed" id="feed"><div class="empty">No messages yet.</div></div>
+  </section>
+</main>
+<script>
+const fmtAgo = (s) => s < 1 ? "just now" : s < 60 ? `${s|0}s ago`
+  : s < 3600 ? `${(s/60)|0}m ago` : `${(s/3600)|0}h ago`;
+const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+async function tick() {
+  try {
+    const [aRes, mRes] = await Promise.all([
+      fetch("/agents?include_deregistered=true"), fetch("/messages?limit=40")
+    ]);
+    const { agents } = await aRes.json();
+    const { messages } = await mRes.json();
+    document.getElementById("conn-dot").style.background = "var(--live)";
+    renderAgents(agents);
+    renderFeed(messages);
+    const live = agents.filter(a => a.status === "live").length;
+    document.getElementById("summary").innerHTML =
+      `<span class="stat"><b>${live}</b> live</span>` +
+      `<span class="stat"><b>${agents.length}</b> registered</span>` +
+      `<span class="stat"><b>${messages.length}</b> recent msgs</span>`;
+  } catch (e) {
+    document.getElementById("conn-dot").style.background = "var(--dead)";
+  }
+}
+
+function renderAgents(agents) {
+  const tb = document.getElementById("agents");
+  if (!agents.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">No agents registered yet.</td></tr>`; return; }
+  const now = Date.now() / 1000;
+  tb.innerHTML = agents.map(a => `
+    <tr>
+      <td class="name">${esc(a.name)}<div class="mono">${esc(a.agent_id)}</div></td>
+      <td><span class="badge ${a.status}"><span class="b"></span>${a.status}${a.connected ? " · ws" : ""}</span></td>
+      <td class="mono">${esc(a.kind)}</td>
+      <td>${(a.capabilities||[]).map(c => `<span class="chip">${esc(c)}</span>`).join("") || '<span class="mono">—</span>'}</td>
+      <td class="mono">${fmtAgo(now - a.last_heartbeat)}</td>
+    </tr>`).join("");
+}
+
+function renderFeed(messages) {
+  const f = document.getElementById("feed");
+  if (!messages.length) { f.innerHTML = `<div class="empty">No messages yet.</div>`; return; }
+  f.innerHTML = messages.slice().reverse().map(m => `
+    <div class="msg">
+      <div class="top">
+        <span class="topic">${esc(m.topic)}</span>
+        <span class="from">${esc(m.sender)}</span>
+      </div>
+      <pre>${esc(JSON.stringify(m.payload))}</pre>
+    </div>`).join("");
+}
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
