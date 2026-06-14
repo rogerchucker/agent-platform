@@ -10,6 +10,10 @@ metadata:
   labels: { app: access-broker }
 spec:
   replicas: 1
+  # Singleton agent identity — fully stop the old pod before starting the new one
+  # so its WS unsubscribe doesn't clobber the new pod's queue subscription (the MQ
+  # keys subscribers by agent_id). See incident-responder.yaml for detail.
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: access-broker }
   template:
@@ -20,7 +24,7 @@ spec:
         - name: registry-raj-agent-idp
       containers:
         - name: broker
-          image: registry.digitalocean.com/raj-agent-idp/agent-idp:sre-control-plane-0.10.0
+          image: registry.digitalocean.com/raj-agent-idp/agent-idp:sre-control-plane-0.11.0
           command: ["python", "-u", "/app/broker_agent.py"]
           workingDir: /app
           env:

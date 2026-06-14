@@ -1,0 +1,47 @@
+# Always-on incident responder, deployed alongside the access broker so incidents
+# are picked up autonomously (no laptop process). Reuses the control-plane image
+# (ships the SDK + deps); the responder script is injected from the
+# incident-responder-src ConfigMap (see deploy-agents.sh). It reconnects across
+# WebSocket drops and re-registers if the control plane restarts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-responder
+  namespace: sre-control-plane
+  labels: { app: incident-responder }
+spec:
+  replicas: 1
+  # Singleton agent identity: fully stop the old pod (so its WS unsubscribe runs)
+  # before starting the new one. A rolling update would have two pods sharing the
+  # same agent_id, and the terminating pod's unsubscribe would clobber the new
+  # pod's queue subscription (the MQ keys subscribers by agent_id).
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: incident-responder }
+  template:
+    metadata:
+      labels: { app: incident-responder }
+    spec:
+      imagePullSecrets:
+        - name: registry-raj-agent-idp
+      containers:
+        - name: responder
+          image: registry.digitalocean.com/raj-agent-idp/agent-idp:sre-control-plane-0.11.0
+          command: ["python", "-u", "/app/responder_agent.py"]
+          workingDir: /app
+          env:
+            - name: CONTROL_PLANE
+              value: "http://control-plane.sre-control-plane.svc.cluster.local"
+            - name: PYTHONPATH
+              value: "/app"
+          volumeMounts:
+            - name: src
+              mountPath: /app/responder_agent.py
+              subPath: responder_agent.py
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: src
+          configMap:
+            name: incident-responder-src

@@ -40,18 +40,28 @@ if missing, and never tears them down — so repeated runs don't spawn throwaway
 Both branches are real: approve → skill granted + guarded gateway remediation +
 Incy resolved; deny → limited triage only.
 
-**Always-on access broker (deployed).** The approver runs as a Deployment in the
-cluster (`examples/devops/k8s/`), so it is permanently live: it reconnects across
-WebSocket drops and **re-registers itself if the control plane restarts**. Deploy
-or update it with:
+**Fully autonomous (deployed).** Both the **access broker** and the **incident
+responder** run as Deployments in the cluster, so incidents are handled with no
+laptop process at all. They reconnect across WebSocket drops and **re-register if
+the control plane restarts** (and use the `Recreate` strategy so a redeploy never
+leaves two pods fighting over one agent identity). Deploy/update both with:
 
 ```bash
-./examples/devops/k8s/deploy-broker.sh           # ConfigMap (the broker script) + Deployment
+./examples/devops/k8s/deploy-agents.sh           # ConfigMaps (agent scripts) + Deployments
+kubectl logs -n sre-control-plane deploy/incident-responder -f
 kubectl logs -n sre-control-plane deploy/access-broker -f
 ```
 
-With it running, you only need to start the responder (or run `demo_interactive.py`)
-— escalations are approved by the in-cluster broker automatically.
+Then just raise an incident and watch it resolve itself:
+
+```bash
+curl -X POST "http://sre-control-plane/incy/trigger?summary=Checkout%20down&severity=critical&dedup_key=demo-$(date +%s)"
+```
+
+> For the **interactive human-approval** demo (`demo_interactive.py`), scale the
+> autonomous responder to 0 first so it doesn't grab the incident:
+> `kubectl scale deploy/incident-responder -n sre-control-plane --replicas=0`
+> (scale it back to 1 afterward).
 
 **Two-agent variant** (responder + a separate access-broker process; output is
 prefixed per agent):
