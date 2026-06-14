@@ -23,10 +23,25 @@ The arc has two parts you can run independently.
 > resolves the incident. Incy's timeline reflects `unacked → investigating →
 > closed`, driven entirely by the agent.
 
+**Recommended for a live demo — one interactive flow, one terminal:**
+
 ```bash
 cd agent-platform
+CONTROL_PLANE=http://sre-control-plane python -u examples/devops/demo_interactive.py
+```
+
+This runs the whole incident as a single linear narration and **pauses for a real
+`[y/N]` decision** at the approval moment — you, the on-call, approve or deny in
+the same flow. `AUTO_APPROVE=y` (or `n`) runs it non-interactively for CI/smoke.
+Both branches are real: approve → skill granted + guarded gateway remediation +
+Incy resolved; deny → limited triage only.
+
+**Two-agent variant** (responder + a separate access-broker process; output is
+prefixed per agent):
+
+```bash
 ./examples/devops/demo.sh                 # broker auto-approves after ~4s
-BROKER_MANUAL=1 ./examples/devops/demo.sh  # you press Enter to approve (great for a live beat)
+BROKER_MANUAL=1 ./examples/devops/demo.sh  # press Enter in the broker to approve
 ```
 
 What to point at as it runs:

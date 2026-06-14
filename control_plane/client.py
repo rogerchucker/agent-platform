@@ -271,6 +271,29 @@ class ControlPlaneClient:
     async def introspect(self, token: str) -> dict:
         return await self._post("/idp/introspect", {"token": token})
 
+    # -- incy bridge (trigger + read proxies) ----------------------------
+    async def incy_trigger(self, summary: str, severity: str = "critical",
+                           dedup_key: Optional[str] = None) -> dict:
+        params: dict[str, Any] = {"summary": summary, "severity": severity}
+        if dedup_key:
+            params["dedup_key"] = dedup_key
+        resp = await self._http.post("/incy/trigger", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def incy_incidents(self, status: Optional[str] = None, limit: int = 20) -> list[dict]:
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        resp = await self._http.get("/incy/incidents", params=params)
+        resp.raise_for_status()
+        return resp.json()["incidents"]
+
+    async def incy_incident(self, incident_id: str) -> dict:
+        resp = await self._http.get(f"/incy/incidents/{incident_id}")
+        resp.raise_for_status()
+        return resp.json()
+
     # -- skill access (CIBA) ---------------------------------------------
     async def authorize_skill(
         self,
