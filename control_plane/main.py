@@ -48,6 +48,7 @@ from .models import (
     SkillApprovalRequest,
     SkillAuthorizeRequest,
     TokenRequest,
+    WorkStateRequest,
 )
 from .registry import AgentRegistry
 
@@ -284,6 +285,16 @@ async def deregister_agent(agent_id: str, hard: bool = False):
     if hard:
         await registry.remove(agent_id)
     return {"ok": True, "idp": idp_result}
+
+
+@app.post("/agents/{agent_id}/work-state")
+async def set_work_state(agent_id: str, req: WorkStateRequest):
+    """An agent reports its incident work state (idle/investigating/blocked/
+    remediating). Drives the dashboard color; also refreshes liveness."""
+    agent = await registry.set_work_state(agent_id, req.state)
+    if not agent:
+        raise HTTPException(404, "agent not found")
+    return {"agent_id": agent_id, "work_state": agent.work_state, "status": agent.status}
 
 
 @app.post("/agents/{agent_id}/heartbeat")

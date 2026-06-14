@@ -100,6 +100,9 @@ async def main() -> int:
         await ensure_agent(approver, APPROVER, name="DevOps Access Broker",
                            kind="approver", trust="high", target="access-broker",
                            capabilities=["skill-approval"], subs=["access.requests"])
+        # Keep the responder heart-beating so it stays live (not swept to inactive)
+        # while it sits BLOCKED waiting for the human approval.
+        responder.start_heartbeat()
 
         # ---- 1. a SEV0 fires in Incy ----
         summary = f"Checkout pods CrashLoopBackOff in CDE ({uuid.uuid4().hex[:4]})"
@@ -118,7 +121,8 @@ async def main() -> int:
             say(f"{R}[incy]{X}", f"(incy unavailable: {exc} — continuing with the CIBA flow)")
         say(f"{M}[incy]{X}", f"SEV0 raised: {summary!r}" + (f"  status={await incy_status(responder, iid)} (UNACKED)" if iid else ""))
 
-        # ---- 2. responder picks it up → Incy investigating ----
+        # ---- 2. responder picks it up → Incy investigating (UI: green) ----
+        await responder.set_work_state("investigating", note=f"picked up {ticket}")
         if iid:
             await responder.publish("incidents", {
                 "kind": "status", "incident_id": iid, "status": "investigating",
@@ -133,6 +137,8 @@ async def main() -> int:
                                              reason=f"remediate {summary}")
         auth_req_id = bc["auth_req_id"]
         st, body = await responder.poll_skill_token(auth_req_id)
+        # BLOCKED on approval → UI turns red until the on-call decides.
+        await responder.set_work_state("blocked", note=f"awaiting approval for {SKILL}:{ACTION}")
         say(f"{C}[agent]{X}", f"needs {B}{SKILL}:{ACTION}{X} — self-grant {R}BLOCKED{X} "
                               f"({body.get('error')}); escalating to on-call (CIBA)")
 
@@ -140,6 +146,8 @@ async def main() -> int:
         approved = await decide(f"Approve {SKILL}:{ACTION} for {ticket} ({summary})?")
         if approved:
             dec = await approver.approve_skill(auth_req_id, reason=f"on-call approves {ticket}")
+            # approval clears the block → UI back to green "investigating".
+            await responder.set_work_state("investigating", note="access granted; remediating")
             say(f"{G}[on-call]{X}", f"APPROVED → {dec.get('status')} (decided_by {dec.get('decided_by')})")
             tokb = await responder.mint_skill_token(auth_req_id)
             intro = await responder.introspect(tokb["access_token"])
@@ -178,6 +186,9 @@ async def main() -> int:
                 "note": f"{outcome}; closing {ticket}"})
             await asyncio.sleep(3)
             say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} (CLOSED)  outcome: {outcome}")
+
+        # incident done → responder goes idle (UI: no longer "working").
+        await responder.set_work_state("idle", note=f"closed {ticket}")
 
         # No teardown: these are the canonical, reused agents — leave them in place
         # for the next run (and so the always-on broker keeps serving).

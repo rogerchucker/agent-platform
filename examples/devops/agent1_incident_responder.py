@@ -85,12 +85,14 @@ async def handle_incident(cp: ControlPlaneClient, inc: dict, grants: dict) -> No
     ticket = f"INC-{uuid.uuid4().hex[:6]}"
     print(f"\n[incy incident #{num}] {inc.get('title')!r} (sev={inc.get('severity')})")
 
-    # 1. Pick it up → incy goes unacked -> investigating.
+    # 1. Pick it up → incy goes unacked -> investigating (UI: green "investigating").
+    await cp.set_work_state("investigating", note=f"picked up {ticket}")
     await set_status(cp, incident_id, "investigating",
                      f"Picked up by SRE agent for {ticket} — investigating root cause")
     print(f"  → picked up; wrote 'investigating' to '{INCIDENTS_TOPIC}' (incy: acknowledged)")
 
     # 2. Investigate: need the guarded runbook skill, which we can't self-grant.
+    #    While waiting on approval the agent is BLOCKED (UI: red).
     await prove_no_access(cp)
     print(f"  escalating on '{REQUESTS_TOPIC}' for {NEEDED_SKILL}:{NEEDED_ACTION} …")
     fut: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -99,8 +101,11 @@ async def handle_incident(cp: ControlPlaneClient, inc: dict, grants: dict) -> No
         "ticket": ticket, "requester_agent_id": cp.agent_id, "requester_subject": SKILL_SUBJECT,
         "skill": NEEDED_SKILL, "action": NEEDED_ACTION, "incident": inc, "deliver_to": GRANTS_TOPIC,
     })
+    await cp.set_work_state("blocked", note=f"awaiting approval for {NEEDED_SKILL}")
     try:
         grant = await asyncio.wait_for(fut, timeout=ESCALATION_TIMEOUT)
+        # approved → back to investigating/remediating (UI: green again)
+        await cp.set_work_state("investigating", note="access granted; remediating")
         intro = await cp.introspect(grant["skill_access_token"])
         print(f"  ✅ got runbook access (token active={intro['active']}); ran the runbook")
         outcome = "remediated using pci-k8s-runbooks"
@@ -114,8 +119,9 @@ async def handle_incident(cp: ControlPlaneClient, inc: dict, grants: dict) -> No
     #     not a narrated one). Needs a runtime the agent can attest with.
     await remediate_via_gateway(cp, ticket)
 
-    # 3. Done → incy goes investigating -> closed.
+    # 3. Done → incy goes investigating -> closed; agent goes idle (UI: not "working").
     await set_status(cp, incident_id, "closed", f"{outcome}; closing {ticket}")
+    await cp.set_work_state("idle", note=f"closed {ticket}")
     print(f"  → wrote 'closed' to '{INCIDENTS_TOPIC}' (incy: resolved)")
 
 

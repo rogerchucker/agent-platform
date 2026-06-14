@@ -96,6 +96,10 @@ class Agent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     status: AgentStatus = AgentStatus.LIVE
+    # Incident work state, distinct from liveness: what the agent is doing right
+    # now. "idle" = not working an incident; "blocked" = waiting on approval;
+    # "investigating"/"remediating" = actively working. Drives the UI color.
+    work_state: str = "idle"
     registered_at: float = Field(default_factory=_now)
     last_heartbeat: float = Field(default_factory=_now)
     # True while a WebSocket connection is open for this agent.
@@ -123,6 +127,12 @@ class PublishRequest(BaseModel):
     topic: str
     payload: dict[str, Any] = Field(default_factory=dict)
     sender: Optional[str] = None
+
+
+class WorkStateRequest(BaseModel):
+    """An agent reporting what it's doing with respect to an incident."""
+    state: Literal["idle", "investigating", "blocked", "remediating"]
+    note: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #

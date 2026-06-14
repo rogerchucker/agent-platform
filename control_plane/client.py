@@ -126,6 +126,21 @@ class ControlPlaneClient:
         resp.raise_for_status()
         return resp.json()
 
+    def start_heartbeat(self) -> None:
+        """Start the background heartbeat loop if it isn't already running. Useful
+        when an agent is reused (not freshly registered) but must stay live —
+        e.g. while blocked waiting for approval."""
+        if self._hb_task is None or self._hb_task.done():
+            self._hb_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def set_work_state(self, state: str, note: Optional[str] = None) -> None:
+        """Report incident work state (idle/investigating/blocked/remediating).
+        Best-effort: never let a UI status update break the actual work."""
+        try:
+            await self._post(f"/agents/{self.agent_id}/work-state", {"state": state, "note": note})
+        except Exception as exc:
+            print(f"[sdk] work-state '{state}' update failed: {exc}", flush=True)
+
     async def deregister(self) -> None:
         if self.agent_id:
             await self._http.delete(f"/agents/{self.agent_id}")

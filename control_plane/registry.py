@@ -109,6 +109,19 @@ class AgentRegistry:
             agent.status = AgentStatus.LIVE
             return agent
 
+    async def set_work_state(self, agent_id: str, state: str) -> Optional[Agent]:
+        async with self._lock:
+            agent = self._agents.get(agent_id)
+            if not agent:
+                return None
+            agent.work_state = state
+            # Reporting work proves liveness, so a busy (e.g. blocked-on-approval)
+            # agent doesn't get swept to INACTIVE while it's clearly working.
+            agent.last_heartbeat = time.time()
+            if agent.status != AgentStatus.DEREGISTERED:
+                agent.status = AgentStatus.LIVE
+            return agent
+
     async def set_connected(self, agent_id: str, connected: bool) -> None:
         async with self._lock:
             agent = self._agents.get(agent_id)
@@ -139,6 +152,10 @@ class AgentRegistry:
             return
         if agent.seconds_since_heartbeat(now) > self.heartbeat_timeout:
             agent.status = AgentStatus.INACTIVE
+            # An agent that stopped heart-beating isn't working an incident any
+            # more; clear its work state so the UI shows "inactive", not a stale
+            # "blocked"/"investigating".
+            agent.work_state = "idle"
         else:
             agent.status = AgentStatus.LIVE
 
