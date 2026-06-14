@@ -333,6 +333,14 @@ async def get_messages(topic: str | None = None, limit: int = 50):
     return {"messages": [m.model_dump() for m in msgs], "count": len(msgs)}
 
 
+@app.delete("/messages")
+async def flush_messages(topic: str | None = None):
+    """Flush retained message history (clears the dashboard feed). Optional
+    ?topic= limits it to one topic. Live agent subscriptions are untouched."""
+    cleared = await mq.clear(topic=topic)
+    return {"cleared": cleared, "topic": topic}
+
+
 @app.get("/topics")
 async def list_topics():
     return {"topics": mq.topics(), "subscribers": mq.subscriber_count()}

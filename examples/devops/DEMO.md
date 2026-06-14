@@ -101,6 +101,18 @@ DEMO PASSED — clone (replica + independent) and delete-with-revocation all ver
 
 ---
 
+## Reset between runs
+
+Clear the dashboard's message feed and wipe Incy's incidents (keeps seed
+services/users/integrations) for a clean slate:
+
+```bash
+./examples/devops/flush-demo.sh
+```
+
+It calls `DELETE /messages` on the control plane (live agent subscriptions are
+untouched) and truncates Incy's event→alert→incident pipeline + timeline.
+
 ## Talking points (the "why it matters")
 
 - **Agents are first-class identities.** Each agent attests its workload (k8s SA / SPIFFE / cloud) → short-lived token → scoped capability → audited gateway action. No standing credentials.

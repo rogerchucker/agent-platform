@@ -81,6 +81,19 @@ class MessageQueue:
                 delivered += 1
         return delivered
 
+    async def clear(self, topic: Optional[str] = None) -> int:
+        """Flush retained message history (what the dashboard shows). Live
+        subscriber queues are left intact so connected agents don't lose
+        in-flight messages. Returns the number of messages dropped."""
+        async with self._lock:
+            if topic is not None:
+                dropped = len(self._history.get(topic, []))
+                self._history.pop(topic, None)
+                return dropped
+            dropped = sum(len(msgs) for msgs in self._history.values())
+            self._history.clear()
+            return dropped
+
     def history(self, topic: Optional[str] = None, limit: int = 50) -> list[Message]:
         if topic is not None:
             return list(self._history.get(topic, []))[-limit:]
