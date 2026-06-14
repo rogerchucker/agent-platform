@@ -26,28 +26,40 @@ Run:
 import asyncio
 import uuid
 
+import json
 import os
 
 from control_plane.client import ControlPlaneClient
 
+# A generic incident responder: it picks incidents off the platform, escalates
+# for a guarded skill when it needs one, and (once granted) performs a guarded
+# remediation through the IdP gateway. Everything that ties it to a particular
+# use case — the skill it needs, the workload identity it attests with, and the
+# remediation it runs — is configuration (env), not hardcoded. The defaults below
+# happen to match the SRE/PCI demo, but the agent is not specific to it.
 CONTROL_PLANE = os.environ.get("CONTROL_PLANE", "http://sre-control-plane")
-# Parameterized so a CLONE can run as a second instance under its own agent_id.
 AGENT_ID = os.environ.get("AGENT_ID", "devops-incident-responder")
 AGENT_NAME = os.environ.get("AGENT_NAME", "DevOps Incident Responder")
+AGENT_KIND = os.environ.get("AGENT_KIND", "incident-responder")
 # A clone is already provisioned in the IdP by the /clone call, so it joins the
 # queue WITHOUT re-provisioning identity (which would re-bind its runtime).
 SKIP_IDENTITY = os.environ.get("SKIP_IDENTITY") == "1"
-# Subject the IdP allow-lists for guarded skills (see SKILL_CLIENT_ALLOWLIST).
-SKILL_SUBJECT = "system:serviceaccount:agent-requester:requester"
 
-NEEDED_SKILL = "pci-k8s-runbooks"
-NEEDED_ACTION = "use"
+# What guarded skill this responder needs, and the subject the IdP allow-lists
+# for it (see SKILL_CLIENT_ALLOWLIST). Empty INCIDENT_SKILL → skip escalation.
+NEEDED_SKILL = os.environ.get("INCIDENT_SKILL", "pci-k8s-runbooks")
+NEEDED_ACTION = os.environ.get("INCIDENT_SKILL_ACTION", "use")
+SKILL_SUBJECT = os.environ.get("SKILL_SUBJECT", "system:serviceaccount:agent-requester:requester")
 
-# Real guarded remediation through the IdP tool gateway — the agent mints a
-# capability and executes it, instead of only narrating "ran the runbook".
-RUNTIME = {"kind": "cloud", "cluster": "local-dev"}
-REMEDIATION_ACTION = "k8s.rollout.restart"
-REMEDIATION_RESOURCE = "kubernetes:cde/deploy/checkout"
+# Workload identity to attest with, and the guarded remediation to run through
+# the IdP tool gateway (a real capability mint + execute, not a narration).
+AGENT_ENV = os.environ.get("AGENT_ENV", "dev")
+RUNTIME = {"kind": os.environ.get("RUNTIME_KIND", "cloud"),
+           "cluster": os.environ.get("RUNTIME_CLUSTER", "local-dev")}
+REMEDIATION_TOOL = os.environ.get("REMEDIATION_TOOL", "kubernetes")
+REMEDIATION_ACTION = os.environ.get("REMEDIATION_ACTION", "k8s.rollout.restart")
+REMEDIATION_RESOURCE = os.environ.get("REMEDIATION_RESOURCE", "kubernetes:cde/deploy/checkout")
+REMEDIATION_PARAMS = json.loads(os.environ.get("REMEDIATION_PARAMS", "{}"))
 
 INCIDENTS_TOPIC = "incidents"        # incy publishes here; we read + write status here
 REQUESTS_TOPIC = "access.requests"   # we ask the broker for escalation here
@@ -91,32 +103,36 @@ async def handle_incident(cp: ControlPlaneClient, inc: dict, grants: dict) -> No
                      f"Picked up by SRE agent for {ticket} — investigating root cause")
     print(f"  → picked up; wrote 'investigating' to '{INCIDENTS_TOPIC}' (incy: acknowledged)")
 
-    # 2. Investigate: need the guarded runbook skill, which we can't self-grant.
-    #    While waiting on approval the agent is BLOCKED (UI: red).
-    await prove_no_access(cp)
-    print(f"  escalating on '{REQUESTS_TOPIC}' for {NEEDED_SKILL}:{NEEDED_ACTION} …")
-    fut: asyncio.Future = asyncio.get_event_loop().create_future()
-    grants[ticket] = fut
-    await cp.publish(REQUESTS_TOPIC, {
-        "ticket": ticket, "requester_agent_id": cp.agent_id, "requester_subject": SKILL_SUBJECT,
-        "skill": NEEDED_SKILL, "action": NEEDED_ACTION, "incident": inc, "deliver_to": GRANTS_TOPIC,
-    })
-    await cp.set_work_state("blocked", note=f"awaiting approval for {NEEDED_SKILL}")
+    # 2. If this responder needs a guarded skill it can't self-grant, escalate for
+    #    approval (BLOCKED, UI red). If no skill is configured, it proceeds straight
+    #    to remediation — the agent isn't tied to any specific guarded workflow.
     granted = denied = False
-    try:
-        grant = await asyncio.wait_for(fut, timeout=ESCALATION_TIMEOUT)
-        if grant.get("denied"):
-            denied = True
-            print(f"  ⛔ access DENIED by approver ({grant.get('reason', 'no reason given')})")
-        else:
-            granted = True
-            await cp.set_work_state("investigating", note="access granted; remediating")
-            intro = await cp.introspect(grant["skill_access_token"])
-            print(f"  ✅ got runbook access (token active={intro['active']})")
-    except asyncio.TimeoutError:
-        print("  ⚠ no approval within timeout")
-    finally:
-        grants.pop(ticket, None)
+    if not NEEDED_SKILL:
+        granted = True
+    else:
+        await prove_no_access(cp)
+        print(f"  escalating on '{REQUESTS_TOPIC}' for {NEEDED_SKILL}:{NEEDED_ACTION} …")
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        grants[ticket] = fut
+        await cp.publish(REQUESTS_TOPIC, {
+            "ticket": ticket, "requester_agent_id": cp.agent_id, "requester_subject": SKILL_SUBJECT,
+            "skill": NEEDED_SKILL, "action": NEEDED_ACTION, "incident": inc, "deliver_to": GRANTS_TOPIC,
+        })
+        await cp.set_work_state("blocked", note=f"awaiting approval for {NEEDED_SKILL}")
+        try:
+            grant = await asyncio.wait_for(fut, timeout=ESCALATION_TIMEOUT)
+            if grant.get("denied"):
+                denied = True
+                print(f"  ⛔ access DENIED by approver ({grant.get('reason', 'no reason given')})")
+            else:
+                granted = True
+                await cp.set_work_state("investigating", note="access granted; remediating")
+                intro = await cp.introspect(grant["skill_access_token"])
+                print(f"  ✅ got runbook access (token active={intro['active']})")
+        except asyncio.TimeoutError:
+            print("  ⚠ no approval within timeout")
+        finally:
+            grants.pop(ticket, None)
 
     # 2b. Remediate through the IdP gateway — ONLY if access was granted.
     remediated = await remediate_via_gateway(cp, ticket) if granted else False
@@ -143,17 +159,17 @@ async def remediate_via_gateway(cp: ControlPlaneClient, ticket: str) -> bool:
     gateway. Returns True on success. A decommissioned/unattestable agent is
     denied here — which is exactly the point."""
     try:
-        token = await cp.get_access_token(runtime=RUNTIME, env="dev",
+        token = await cp.get_access_token(runtime=RUNTIME, env=AGENT_ENV,
                                           session_id=ticket, trace_id=ticket)
         grant = await cp.request_grant(
-            action=REMEDIATION_ACTION, resource=REMEDIATION_RESOURCE,
+            action=REMEDIATION_ACTION, resource=REMEDIATION_RESOURCE, env=AGENT_ENV,
             purpose="remediation", reason=f"auto-remediation for {ticket}", ticket=ticket)
         cap = await cp.mint_capability(
             token, grant["grant_id"], REMEDIATION_ACTION, REMEDIATION_RESOURCE,
             purpose="remediation", reason=f"auto-remediation for {ticket}", ticket=ticket)
-        out = await cp.execute(cap["capability_token"], tool="kubernetes",
+        out = await cp.execute(cap["capability_token"], tool=REMEDIATION_TOOL,
                                action=REMEDIATION_ACTION, resource=REMEDIATION_RESOURCE,
-                               params={"namespace": "cde", "workload": "checkout"})
+                               params=REMEDIATION_PARAMS)
         print(f"  🔧 gateway executed {REMEDIATION_ACTION} on {REMEDIATION_RESOURCE} "
               f"→ {out.get('status')}")
         return out.get("status") == "executed"
@@ -166,12 +182,13 @@ async def main():
     grants: dict = {}
     async with ControlPlaneClient(CONTROL_PLANE) as cp:
         identity = None if SKIP_IDENTITY else {
-            "owner_principal": "rajarshic@gmail.com", "trust_level": "low",
-            "allowed_envs": ["dev"], "framework": "custom",
+            "owner_principal": os.environ.get("AGENT_OWNER", "rajarshic@gmail.com"),
+            "trust_level": os.environ.get("AGENT_TRUST", "low"),
+            "allowed_envs": [AGENT_ENV], "framework": "custom",
             "target_application": "incident-response",
-            "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}]}
+            "runtime_bindings": [RUNTIME]}
         agent = await cp.register(
-            name=AGENT_NAME, kind="incident-responder", agent_id=AGENT_ID,
+            name=AGENT_NAME, kind=AGENT_KIND, agent_id=AGENT_ID,
             capabilities=["triage", "runbook-exec"],
             subscriptions=[INCIDENTS_TOPIC, GRANTS_TOPIC],
             identity=identity,

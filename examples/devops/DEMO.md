@@ -58,6 +58,22 @@ Then just raise an incident and watch it resolve itself:
 curl -X POST "http://sre-control-plane/incy/trigger?summary=Checkout%20down&severity=critical&dedup_key=demo-$(date +%s)"
 ```
 
+**The agents are generic, not demo-specific.** Both are configured entirely by
+env (the defaults below match this demo, but nothing is hardcoded to it):
+
+| Responder env | default | meaning |
+|---|---|---|
+| `INCIDENT_SKILL` / `INCIDENT_SKILL_ACTION` | `pci-k8s-runbooks` / `use` | guarded skill it escalates for (empty → no escalation) |
+| `SKILL_SUBJECT` | `system:serviceaccount:agent-requester:requester` | allow-listed subject for the skill |
+| `REMEDIATION_TOOL` / `REMEDIATION_ACTION` / `REMEDIATION_RESOURCE` / `REMEDIATION_PARAMS` | `kubernetes` / `k8s.rollout.restart` / `kubernetes:cde/deploy/checkout` / `{}` | the guarded action run through the gateway |
+| `RUNTIME_KIND` / `RUNTIME_CLUSTER` / `AGENT_ENV` | `cloud` / `local-dev` / `dev` | workload identity it attests with |
+
+| Broker env | default | meaning |
+|---|---|---|
+| `BROKER_APPROVE_SKILLS` | `*` | approve allow-list (`*` = any) |
+| `BROKER_DENY_SKILLS` | — | explicit deny-list |
+| `BROKER_DENY` | — | `1` = deny everything |
+
 > For the **interactive human-approval** demo (`demo_interactive.py`), scale the
 > autonomous responder to 0 first so it doesn't grab the incident:
 > `kubectl scale deploy/incident-responder -n sre-control-plane --replicas=0`

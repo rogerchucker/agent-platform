@@ -31,10 +31,24 @@ REQUESTS_TOPIC = "access.requests"   # listens here (separate from incy's alerts
 #   BROKER_APPROVAL_DELAY=N  → pause N seconds before approving (default 0 = instant)
 MANUAL = os.getenv("BROKER_MANUAL") == "1"
 APPROVAL_DELAY = float(os.getenv("BROKER_APPROVAL_DELAY", "0"))
-# Deny policy (for demoing the denied path): BROKER_DENY=1 denies everything;
-# BROKER_DENY_SKILLS="a,b" denies those skills. Default: approve.
-DENY_ALL = os.getenv("BROKER_DENY") == "1"
+# Approval policy (generic, not tied to any one skill):
+#   BROKER_APPROVE_SKILLS  allow-list; "*" (default) approves any requested skill.
+#   BROKER_DENY_SKILLS     explicit deny-list (takes precedence).
+#   BROKER_DENY=1          deny everything (kill switch / demo the denied path).
+APPROVE_SKILLS = {s.strip() for s in os.getenv("BROKER_APPROVE_SKILLS", "*").split(",") if s.strip()}
 DENY_SKILLS = {s.strip() for s in os.getenv("BROKER_DENY_SKILLS", "").split(",") if s.strip()}
+DENY_ALL = os.getenv("BROKER_DENY") == "1"
+
+
+def deny_reason(skill: str) -> str | None:
+    """Return a denial reason if policy denies this skill, else None (approve)."""
+    if DENY_ALL:
+        return "denied by access broker policy (deny-all)"
+    if skill in DENY_SKILLS:
+        return f"skill '{skill}' is on the broker deny-list"
+    if "*" not in APPROVE_SKILLS and skill not in APPROVE_SKILLS:
+        return f"skill '{skill}' is not on the broker approve allow-list"
+    return None
 
 
 async def _approval_gate(ticket: str) -> None:
@@ -79,13 +93,13 @@ async def handle_request(cp: ControlPlaneClient, req: dict) -> None:
     #    BROKER_DENY_SKILLS) denies the request — and we tell the requester so it
     #    does NOT close the incident.
     await _approval_gate(ticket)
-    if DENY_ALL or skill in DENY_SKILLS:
-        await cp.deny_skill(auth_req_id, reason=f"broker denies {ticket} (policy)")
-        print(f"  ⛔ DENIED {ticket} for {skill}:{action} (broker policy)")
+    reason = deny_reason(skill)
+    if reason:
+        await cp.deny_skill(auth_req_id, reason=f"{reason} ({ticket})")
+        print(f"  ⛔ DENIED {ticket} for {skill}:{action} — {reason}")
         await cp.publish(deliver_to, {
             "ticket": ticket, "skill": skill, "action": action,
-            "denied": True, "reason": "denied by access broker policy",
-            "granted_by": cp.agent_id,
+            "denied": True, "reason": reason, "granted_by": cp.agent_id,
         })
         print(f"  → delivered DENIAL for {ticket} to '{deliver_to}'")
         return
