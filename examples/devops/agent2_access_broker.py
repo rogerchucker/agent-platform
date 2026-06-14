@@ -22,7 +22,7 @@ import os
 
 from control_plane.client import ControlPlaneClient
 
-CONTROL_PLANE = "http://sre-control-plane"
+CONTROL_PLANE = os.environ.get("CONTROL_PLANE", "http://sre-control-plane")
 AGENT_ID = "devops-access-broker"
 REQUESTS_TOPIC = "access.requests"   # listens here (separate from incy's alerts.incy)
 

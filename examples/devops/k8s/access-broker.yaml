@@ -1,0 +1,44 @@
+# Always-on access broker (the approver agent), deployed in-cluster so it is
+# permanently live and reconnects across WebSocket drops. Reuses the control-plane
+# image (which already ships the control_plane SDK + httpx/websockets); the broker
+# script is injected from the access-broker-src ConfigMap (see deploy-broker.sh).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: access-broker
+  namespace: sre-control-plane
+  labels: { app: access-broker }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: access-broker }
+  template:
+    metadata:
+      labels: { app: access-broker }
+    spec:
+      imagePullSecrets:
+        - name: registry-raj-agent-idp
+      containers:
+        - name: broker
+          image: registry.digitalocean.com/raj-agent-idp/agent-idp:sre-control-plane-0.9.0
+          command: ["python", "-u", "/app/broker_agent.py"]
+          workingDir: /app
+          env:
+            - name: CONTROL_PLANE
+              value: "http://control-plane.sre-control-plane.svc.cluster.local"
+            - name: PYTHONPATH
+              value: "/app"
+            # Always-on approver: auto-approve instantly (no human stdin in a pod).
+            - name: BROKER_APPROVAL_DELAY
+              value: "0"
+          volumeMounts:
+            - name: src
+              mountPath: /app/broker_agent.py
+              subPath: broker_agent.py    # single-file mount; does not shadow /app/control_plane
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      volumes:
+        - name: src
+          configMap:
+            name: access-broker-src

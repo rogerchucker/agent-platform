@@ -50,6 +50,7 @@ class ControlPlaneClient:
         self.agent_id: Optional[str] = None
         self._http = httpx.AsyncClient(base_url=self.base_url, timeout=20.0)
         self._hb_task: Optional[asyncio.Task] = None
+        self._reg: Optional[dict] = None  # last register() args, for re-registration
 
     async def __aenter__(self) -> "ControlPlaneClient":
         return self
@@ -93,9 +94,32 @@ class ControlPlaneClient:
         resp.raise_for_status()
         agent = resp.json()
         self.agent_id = agent["agent_id"]
-        if auto_heartbeat:
+        # Remember args so we can re-register if the control plane forgets us
+        # (its registry is in-memory and is wiped on restart).
+        self._reg = {"name": name, "kind": kind, "capabilities": capabilities,
+                     "subscriptions": subscriptions, "metadata": metadata,
+                     "agent_id": agent["agent_id"], "identity": identity}
+        if auto_heartbeat and self._hb_task is None:
             self._hb_task = asyncio.create_task(self._heartbeat_loop())
         return agent
+
+    async def _ensure_registered(self) -> None:
+        """Make sure the control plane still knows this agent; re-register if it
+        was forgotten (e.g. the control plane restarted). No-op until first
+        register()."""
+        if not self._reg or not self.agent_id:
+            return
+        try:
+            r = await self._http.post(f"/agents/{self.agent_id}/heartbeat")
+            if r.status_code == 200:
+                return
+        except Exception:
+            pass
+        try:
+            await self.register(**{**self._reg, "auto_heartbeat": False})
+            print(f"[sdk] re-registered {self.agent_id} (control plane had forgotten it)", flush=True)
+        except Exception as exc:
+            print(f"[sdk] re-register failed: {exc}", flush=True)
 
     async def heartbeat(self) -> dict:
         resp = await self._http.post(f"/agents/{self.agent_id}/heartbeat")
@@ -213,6 +237,7 @@ class ControlPlaneClient:
         The REST heartbeat keeps the agent registered across reconnects."""
         while True:
             try:
+                await self._ensure_registered()  # recover if the control plane restarted
                 async for frame in self.listen(topics):
                     yield frame
                 # listen() returned → server closed the stream cleanly.

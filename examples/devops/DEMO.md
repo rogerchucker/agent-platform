@@ -36,6 +36,19 @@ the same flow. `AUTO_APPROVE=y` (or `n`) runs it non-interactively for CI/smoke.
 Both branches are real: approve → skill granted + guarded gateway remediation +
 Incy resolved; deny → limited triage only.
 
+**Always-on access broker (deployed).** The approver runs as a Deployment in the
+cluster (`examples/devops/k8s/`), so it is permanently live: it reconnects across
+WebSocket drops and **re-registers itself if the control plane restarts**. Deploy
+or update it with:
+
+```bash
+./examples/devops/k8s/deploy-broker.sh           # ConfigMap (the broker script) + Deployment
+kubectl logs -n sre-control-plane deploy/access-broker -f
+```
+
+With it running, you only need to start the responder (or run `demo_interactive.py`)
+— escalations are approved by the in-cluster broker automatically.
+
 **Two-agent variant** (responder + a separate access-broker process; output is
 prefixed per agent):
 
