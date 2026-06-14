@@ -41,12 +41,27 @@ metadata:
   name: sre-control-plane-ts-serve
   namespace: sre-control-plane
 data:
-  # Raw TCP forward of tailnet port 80 -> in-cluster control-plane service.
-  # Carries both REST and WebSocket (the message queue) transparently.
+  # Port 80: raw TCP forward to the in-cluster control-plane service — carries
+  #   both REST and WebSocket (the message queue) transparently for tailnet peers
+  #   and the in-cluster agents (http://sre-control-plane).
+  # Port 443: HTTPS serve + Funnel — exposes the dashboard to the PUBLIC internet
+  #   at https://sre-control-plane.<tailnet>.ts.net. NOTE: the control plane has
+  #   no authentication; anyone can view/act. (WebSocket also works over 443.)
   serve.json: |
     {
       "TCP": {
-        "80": { "TCPForward": "control-plane.sre-control-plane.svc.cluster.local:80" }
+        "80": { "TCPForward": "control-plane.sre-control-plane.svc.cluster.local:80" },
+        "443": { "HTTPS": true }
+      },
+      "AllowFunnel": {
+        "${TS_CERT_DOMAIN}:443": true
+      },
+      "Web": {
+        "${TS_CERT_DOMAIN}:443": {
+          "Handlers": {
+            "/": { "Proxy": "http://control-plane.sre-control-plane.svc.cluster.local:80" }
+          }
+        }
       }
     }
 ---
