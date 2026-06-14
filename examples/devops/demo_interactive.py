@@ -144,6 +144,7 @@ async def main() -> int:
 
         # ---- 4. THE interactive beat: human approves or denies, in this flow ----
         approved = await decide(f"Approve {SKILL}:{ACTION} for {ticket} ({summary})?")
+        remediated = False
         if approved:
             dec = await approver.approve_skill(auth_req_id, reason=f"on-call approves {ticket}")
             # approval clears the block → UI back to green "investigating".
@@ -169,26 +170,32 @@ async def main() -> int:
                                               params={"namespace": "cde", "workload": "checkout"})
                 say(f"{G}[agent]{X}", f"🔧 gateway executed {REMEDIATION_ACTION} on "
                                       f"{REMEDIATION_RESOURCE} → {out.get('status')}")
-                outcome = "remediated using pci-k8s-runbooks"
+                remediated = out.get("status") == "executed"
             except Exception as exc:
                 say(f"{R}[agent]{X}", f"gateway remediation failed: {exc}")
-                outcome = "runbook granted; remediation errored"
         else:
             await approver.deny_skill(auth_req_id, reason=f"on-call denies {ticket}")
-            say(f"{R}[on-call]{X}", "DENIED — agent proceeds with limited triage only")
-            outcome = "triaged without runbook access (access denied)"
+            say(f"{R}[on-call]{X}", "DENIED — agent cannot remediate; leaving incident OPEN")
 
-        # ---- 6. resolve → Incy closed ----
+        # ---- 6. close ONLY if remediated; otherwise leave OPEN for a human ----
         if iid:
-            await responder.publish("incidents", {
-                "kind": "status", "incident_id": iid, "status": "closed",
-                "agent_id": responder.agent_id, "agent_name": "DevOps Incident Responder",
-                "note": f"{outcome}; closing {ticket}"})
-            await asyncio.sleep(3)
-            say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} (CLOSED)  outcome: {outcome}")
-
-        # incident done → responder goes idle (UI: no longer "working").
-        await responder.set_work_state("idle", note=f"closed {ticket}")
+            if remediated:
+                await responder.publish("incidents", {
+                    "kind": "status", "incident_id": iid, "status": "closed",
+                    "agent_id": responder.agent_id, "agent_name": "DevOps Incident Responder",
+                    "note": f"Remediated with {SKILL}; closing {ticket}"})
+                await asyncio.sleep(3)
+                say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} (CLOSED)")
+            else:
+                why = "access denied by on-call" if not approved else "remediation failed"
+                await responder.publish("incidents", {
+                    "kind": "status", "incident_id": iid, "status": "escalated",
+                    "agent_id": responder.agent_id, "agent_name": "DevOps Incident Responder",
+                    "note": f"⚠ {ticket}: agent could NOT remediate ({why}) — needs a human"})
+                await asyncio.sleep(3)
+                say(f"{M}[incy]{X}", f"status → {await incy_status(responder, iid)} "
+                                     f"(still OPEN — {why}; NOT resolved)")
+        await responder.set_work_state("idle", note=f"done with {ticket}")
 
         # No teardown: these are the canonical, reused agents — leave them in place
         # for the next run (and so the always-on broker keeps serving).

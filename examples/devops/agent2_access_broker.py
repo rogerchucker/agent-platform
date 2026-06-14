@@ -31,6 +31,10 @@ REQUESTS_TOPIC = "access.requests"   # listens here (separate from incy's alerts
 #   BROKER_APPROVAL_DELAY=N  → pause N seconds before approving (default 0 = instant)
 MANUAL = os.getenv("BROKER_MANUAL") == "1"
 APPROVAL_DELAY = float(os.getenv("BROKER_APPROVAL_DELAY", "0"))
+# Deny policy (for demoing the denied path): BROKER_DENY=1 denies everything;
+# BROKER_DENY_SKILLS="a,b" denies those skills. Default: approve.
+DENY_ALL = os.getenv("BROKER_DENY") == "1"
+DENY_SKILLS = {s.strip() for s in os.getenv("BROKER_DENY_SKILLS", "").split(",") if s.strip()}
 
 
 async def _approval_gate(ticket: str) -> None:
@@ -64,15 +68,27 @@ async def handle_request(cp: ControlPlaneClient, req: dict) -> None:
         print("  ✗ requester is not live — denying escalation")
         return
 
-    # 2. Mint a token via OpenID CIBA, on behalf of the requester's subject.
+    # 2. Open back-channel authorization (OpenID CIBA) on behalf of the subject.
     bc = await cp.authorize_skill(skill, action=action, login_hint=subject,
                                   binding_message=f"escalation for {ticket}",
-                                  reason=f"approved by broker for {ticket}")
+                                  reason=f"escalation for {ticket}")
     auth_req_id = bc["auth_req_id"]
     print(f"  bc-authorize -> auth_req_id={auth_req_id} (guarded: pending approval)")
 
-    # 3. Approve it as the authorized approver (brokered; admin key stays server-side).
+    # 3. Decide. Default is approve; a deny policy (BROKER_DENY=1, or skill in
+    #    BROKER_DENY_SKILLS) denies the request — and we tell the requester so it
+    #    does NOT close the incident.
     await _approval_gate(ticket)
+    if DENY_ALL or skill in DENY_SKILLS:
+        await cp.deny_skill(auth_req_id, reason=f"broker denies {ticket} (policy)")
+        print(f"  ⛔ DENIED {ticket} for {skill}:{action} (broker policy)")
+        await cp.publish(deliver_to, {
+            "ticket": ticket, "skill": skill, "action": action,
+            "denied": True, "reason": "denied by access broker policy",
+            "granted_by": cp.agent_id,
+        })
+        print(f"  → delivered DENIAL for {ticket} to '{deliver_to}'")
+        return
     decision = await cp.approve_skill(auth_req_id, reason=f"broker approves {ticket}")
     print(f"  ✔ APPROVED {ticket} -> {decision.get('status')} by {decision.get('decided_by')}")
 

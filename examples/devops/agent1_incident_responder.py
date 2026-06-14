@@ -102,33 +102,46 @@ async def handle_incident(cp: ControlPlaneClient, inc: dict, grants: dict) -> No
         "skill": NEEDED_SKILL, "action": NEEDED_ACTION, "incident": inc, "deliver_to": GRANTS_TOPIC,
     })
     await cp.set_work_state("blocked", note=f"awaiting approval for {NEEDED_SKILL}")
+    granted = denied = False
     try:
         grant = await asyncio.wait_for(fut, timeout=ESCALATION_TIMEOUT)
-        # approved → back to investigating/remediating (UI: green again)
-        await cp.set_work_state("investigating", note="access granted; remediating")
-        intro = await cp.introspect(grant["skill_access_token"])
-        print(f"  ✅ got runbook access (token active={intro['active']}); ran the runbook")
-        outcome = "remediated using pci-k8s-runbooks"
+        if grant.get("denied"):
+            denied = True
+            print(f"  ⛔ access DENIED by approver ({grant.get('reason', 'no reason given')})")
+        else:
+            granted = True
+            await cp.set_work_state("investigating", note="access granted; remediating")
+            intro = await cp.introspect(grant["skill_access_token"])
+            print(f"  ✅ got runbook access (token active={intro['active']})")
     except asyncio.TimeoutError:
-        print("  ⚠ no grant within timeout — proceeding with limited triage")
-        outcome = "triaged without runbook access"
+        print("  ⚠ no approval within timeout")
     finally:
         grants.pop(ticket, None)
 
-    # 2b. Actually remediate through the IdP tool gateway (a real guarded action,
-    #     not a narrated one). Needs a runtime the agent can attest with.
-    await remediate_via_gateway(cp, ticket)
+    # 2b. Remediate through the IdP gateway — ONLY if access was granted.
+    remediated = await remediate_via_gateway(cp, ticket) if granted else False
 
-    # 3. Done → incy goes investigating -> closed; agent goes idle (UI: not "working").
-    await set_status(cp, incident_id, "closed", f"{outcome}; closing {ticket}")
-    await cp.set_work_state("idle", note=f"closed {ticket}")
-    print(f"  → wrote 'closed' to '{INCIDENTS_TOPIC}' (incy: resolved)")
+    # 3. Resolve ONLY when we actually remediated. A denied / timed-out / failed
+    #    agent must NOT auto-close the incident — leave it OPEN for a human.
+    if remediated:
+        await set_status(cp, incident_id, "closed",
+                         f"Remediated with {NEEDED_SKILL}; closing {ticket}")
+        await cp.set_work_state("idle", note=f"resolved {ticket}")
+        print(f"  → wrote 'closed' to '{INCIDENTS_TOPIC}' (incy: RESOLVED)")
+    else:
+        reason = ("access denied by approver" if denied
+                  else "approval timed out" if not granted
+                  else "remediation failed")
+        await set_status(cp, incident_id, "escalated",
+                         f"⚠ {ticket}: agent could NOT remediate ({reason}) — needs a human")
+        await cp.set_work_state("idle", note=f"handed off {ticket} to a human")
+        print(f"  → left incident OPEN for a human ({reason}); NOT resolved")
 
 
-async def remediate_via_gateway(cp: ControlPlaneClient, ticket: str) -> None:
+async def remediate_via_gateway(cp: ControlPlaneClient, ticket: str) -> bool:
     """Mint a scoped capability and execute the remediation through the IdP
-    gateway. Best-effort: an agent with no attestable runtime (or a
-    decommissioned one) is denied here — which is exactly the point."""
+    gateway. Returns True on success. A decommissioned/unattestable agent is
+    denied here — which is exactly the point."""
     try:
         token = await cp.get_access_token(runtime=RUNTIME, env="dev",
                                           session_id=ticket, trace_id=ticket)
@@ -143,8 +156,10 @@ async def remediate_via_gateway(cp: ControlPlaneClient, ticket: str) -> None:
                                params={"namespace": "cde", "workload": "checkout"})
         print(f"  🔧 gateway executed {REMEDIATION_ACTION} on {REMEDIATION_RESOURCE} "
               f"→ {out.get('status')}")
+        return out.get("status") == "executed"
     except Exception as exc:
         print(f"  (gateway remediation unavailable: {exc})")
+        return False
 
 
 async def main():

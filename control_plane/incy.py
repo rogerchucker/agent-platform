@@ -138,11 +138,27 @@ class IncyConnector:
     async def _apply_status(self, payload: dict, sender: str) -> None:
         incident_id = payload.get("incident_id")
         status = payload.get("status")
-        action = _STATUS_ACTIONS.get(status)
-        if not incident_id or not action:
+        if not incident_id:
             return
         headers = {"X-User-Id": self.agent_user_id} if self.agent_user_id else {}
         agent = payload.get("agent_name") or sender
+
+        # "escalated" = the agent could NOT remediate (denied / failed) and is
+        # handing the incident back to a human: add a note ONLY, leaving the
+        # incident OPEN. It must not resolve.
+        if status == "escalated":
+            note = payload.get("note") or f"Escalated by {agent} — needs human attention"
+            try:
+                await self._http().post(
+                    f"/v1/incidents/{incident_id}/notes", headers=headers, json={"content": note})
+                logger.info("incy incident %s escalated (note only) by %s", incident_id, agent)
+            except Exception as exc:  # pragma: no cover - network
+                logger.warning("incy note failed for %s: %s", incident_id, exc)
+            return
+
+        action = _STATUS_ACTIONS.get(status)
+        if not action:
+            return
         try:
             r = await self._http().post(f"/v1/incidents/{incident_id}/{action}", headers=headers)
             r.raise_for_status()
