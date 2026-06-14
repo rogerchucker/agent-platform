@@ -61,6 +61,16 @@ class FakeIdP:
     async def jwks(self):
         return {"keys": []}
 
+    async def clone_agent(self, agent_id, req):
+        self.calls.append(("clone_agent", agent_id, req))
+        bindings = [{"kind": "cloud", "cluster": "x"}] if req.get("clone_bindings") else []
+        return {"agent_id": req["new_agent_id"], "status": "active", "runtime_bindings": bindings}
+
+    async def delete_agent(self, agent_id, hard=False):
+        self.calls.append(("delete_agent", agent_id, hard))
+        return {"status": "deleted", "agent_id": agent_id, "hard": hard,
+                "revoked_grants": 1, "denied_jti": 2, "revoked_skill_grants": 0}
+
     async def close(self):
         pass
 
@@ -162,3 +172,75 @@ def test_skill_approval_requires_registered_approver(client):
     r = client.post("/idp/skills/approve", json={
         "auth_req_id": "ciba-2", "approver_agent_id": approver, "decision": "deny"})
     assert r.json()["status"] == "denied"
+
+
+# --------------------------------------------------------------- clone / delete
+
+def _provisioned(client, agent_id):
+    return client.post("/agents", json={
+        "name": agent_id, "kind": "rootcause", "agent_id": agent_id,
+        "identity": {
+            "owner_principal": "o@example.com", "trust_level": "low",
+            "allowed_envs": ["dev"],
+            "runtime_bindings": [{"kind": "cloud", "cluster": "local-dev"}],
+        },
+    })
+
+
+def test_clone_forks_identity_in_idp(client):
+    assert _provisioned(client, "src-1").status_code == 201
+    r = client.post("/agents/src-1/clone", json={"new_agent_id": "clone-1", "clone_bindings": False})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["agent_id"] == "clone-1"
+    assert body["idp_provisioned"] is True
+    clones = [c for c in client.fake.calls if c[0] == "clone_agent"]
+    assert clones and clones[0][1] == "src-1"
+    assert clones[0][2]["new_agent_id"] == "clone-1"
+    assert clones[0][2]["clone_bindings"] is False
+
+
+def test_clone_collision_returns_409(client):
+    _provisioned(client, "src-2")
+    client.post("/agents", json={"name": "taken", "agent_id": "taken"})
+    assert client.post("/agents/src-2/clone", json={"new_agent_id": "taken"}).status_code == 409
+
+
+def test_clone_missing_source_404(client):
+    assert client.post("/agents/nope/clone", json={}).status_code == 404
+
+
+def test_clone_without_identity_skips_idp(client):
+    client.post("/agents", json={"name": "plain", "agent_id": "src-3"})  # no identity
+    r = client.post("/agents/src-3/clone", json={"new_agent_id": "clone-3"})
+    assert r.status_code == 201
+    assert r.json()["idp_provisioned"] is False
+    assert not [c for c in client.fake.calls if c[0] == "clone_agent"]
+
+
+def test_delete_tears_down_idp_identity(client):
+    _provisioned(client, "del-1")
+    r = client.delete("/agents/del-1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["idp"]["status"] == "deleted"
+    assert body["idp"]["revoked_grants"] == 1
+    deletes = [c for c in client.fake.calls if c[0] == "delete_agent"]
+    assert deletes and deletes[0][1] == "del-1" and deletes[0][2] is False
+
+
+def test_delete_without_identity_skips_idp(client):
+    client.post("/agents", json={"name": "plain2", "agent_id": "del-2"})
+    r = client.delete("/agents/del-2")
+    assert r.status_code == 200
+    assert r.json()["idp"] is None
+    assert not [c for c in client.fake.calls if c[0] == "delete_agent"]
+
+
+def test_delete_hard_passes_flag(client):
+    _provisioned(client, "del-3")
+    r = client.delete("/agents/del-3", params={"hard": "true"})
+    assert r.json()["idp"]["hard"] is True
+    deletes = [c for c in client.fake.calls if c[0] == "delete_agent"]
+    assert deletes and deletes[0][2] is True

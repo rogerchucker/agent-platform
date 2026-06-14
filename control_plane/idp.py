@@ -95,6 +95,15 @@ class IdPClient:
     async def get_agent(self, agent_id: str) -> dict[str, Any]:
         return await self._call("GET", f"/agents/{agent_id}", self._admin_h)
 
+    async def list_agents(self) -> dict[str, Any]:
+        return await self._call("GET", "/agents", self._admin_h)
+
+    async def clone_agent(self, agent_id: str, req: dict[str, Any]) -> dict[str, Any]:
+        return await self._call("POST", f"/agents/{agent_id}/clone", self._admin_h, req)
+
+    async def delete_agent(self, agent_id: str, hard: bool = False) -> Any:
+        return await self._call("DELETE", f"/agents/{agent_id}?hard={'true' if hard else 'false'}", self._admin_h)
+
     # -- attestation -> agent access token (internal) ---------------------
     async def attest_exchange(self, attestation: dict[str, Any]) -> dict[str, Any]:
         return await self._call("POST", "/attest/exchange", self._internal_h, attestation)

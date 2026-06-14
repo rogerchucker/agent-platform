@@ -73,6 +73,18 @@ class RegisterRequest(BaseModel):
     identity: Optional[IdentitySpec] = None
 
 
+class CloneRequest(BaseModel):
+    """Fork an existing agent into a new one. The clone gets a fresh id and IdP
+    identity; it never inherits the source's tokens or grants. By default the
+    clone is independent (the IdP assigns no runtime bindings); set clone_bindings
+    to make it a replica that shares the source's workload identity."""
+
+    new_agent_id: Optional[str] = None
+    name: Optional[str] = None
+    clone_bindings: bool = False
+    owner_principal: Optional[str] = None
+
+
 class Agent(BaseModel):
     """A registered agent and its live state."""
 

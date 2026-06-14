@@ -97,3 +97,24 @@ async def test_history_and_unsubscribe():
     assert mq.subscriber_count() == 1
     await mq.unsubscribe("a1")
     assert mq.subscriber_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_clone_creates_fresh_independent_agent():
+    reg = AgentRegistry()
+    await reg.register(RegisterRequest(name="rc", kind="rootcause",
+                                       capabilities=["db"], subscriptions=["incidents"],
+                                       agent_id="src"))
+    clone = await reg.clone("src", new_id="clone")
+    assert clone is not None
+    assert clone.agent_id == "clone"
+    assert clone.capabilities == ["db"]
+    assert clone.subscriptions == ["incidents"]
+    assert clone.status == "live"
+    assert clone.connected is False
+    assert clone.idp_provisioned is False           # fresh — not inherited
+    # collision on an existing id
+    with pytest.raises(ValueError):
+        await reg.clone("src", new_id="clone")
+    # missing source returns None
+    assert await reg.clone("nope", new_id="z") is None

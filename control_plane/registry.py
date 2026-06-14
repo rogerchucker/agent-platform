@@ -63,6 +63,28 @@ class AgentRegistry:
             self._agents[agent.agent_id] = agent
             return agent
 
+    async def clone(self, source_id: str, new_id: Optional[str] = None, name: Optional[str] = None) -> Optional[Agent]:
+        """Create a new agent from an existing one's config. Returns None if the
+        source is missing; raises ValueError if new_id is already taken. The clone
+        starts fresh (LIVE, not connected, no IdP provisioning yet)."""
+        async with self._lock:
+            src = self._agents.get(source_id)
+            if not src:
+                return None
+            if new_id and new_id in self._agents:
+                raise ValueError("agent_exists")
+            agent = Agent(
+                name=name or f"{src.name}-clone",
+                kind=src.kind,
+                capabilities=list(src.capabilities),
+                subscriptions=list(src.subscriptions),
+                metadata=dict(src.metadata),
+            )
+            if new_id:
+                agent.agent_id = new_id
+            self._agents[agent.agent_id] = agent
+            return agent
+
     async def deregister(self, agent_id: str) -> bool:
         async with self._lock:
             agent = self._agents.get(agent_id)

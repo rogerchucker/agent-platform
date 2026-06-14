@@ -37,6 +37,7 @@ from .message_queue import MessageQueue
 from .models import (
     Agent,
     CapabilityRequest,
+    CloneRequest,
     ExecuteRequest,
     GrantRequest,
     IdentitySpec,
@@ -242,12 +243,43 @@ async def skill_approve(req: SkillApprovalRequest):
         raise HTTPException(exc.status if exc.status < 600 else 502, exc.detail)
 
 
+@app.post("/agents/{agent_id}/clone", status_code=201)
+async def clone_agent(agent_id: str, req: CloneRequest):
+    """Clone an agent in the control plane and (if it had an identity) in the IdP.
+    The clone is a fresh identity — it never inherits the source's tokens/grants."""
+    source = _agent_or_404(agent_id)
+    if req.new_agent_id and registry.get(req.new_agent_id):
+        raise HTTPException(409, "agent_already_exists")
+    clone = await registry.clone(agent_id, new_id=req.new_agent_id, name=req.name)
+    if source.idp_provisioned and idp.enabled:
+        body: dict = {"new_agent_id": clone.agent_id, "clone_bindings": req.clone_bindings}
+        if req.owner_principal:
+            body["owner_principal"] = req.owner_principal
+        try:
+            await idp.clone_agent(agent_id, body)
+            clone.idp_provisioned = True
+            clone.idp_error = None
+        except IdPError as exc:
+            clone.idp_provisioned = False
+            clone.idp_error = f"{exc.status}: {exc.detail}"
+    return clone.model_dump()
+
+
 @app.delete("/agents/{agent_id}")
-async def deregister_agent(agent_id: str):
+async def deregister_agent(agent_id: str, hard: bool = False):
+    agent = registry.get(agent_id)
     if not await registry.deregister(agent_id):
         raise HTTPException(404, "agent not found")
     await mq.unsubscribe(agent_id)
-    return {"ok": True}
+    # Tear down the IdP identity too: disable + revoke grants/tokens/skill-grants
+    # (or hard-delete the record). Without this the agent's credentials outlive it.
+    idp_result = None
+    if agent and agent.idp_provisioned and idp.enabled:
+        try:
+            idp_result = await idp.delete_agent(agent_id, hard=hard)
+        except IdPError as exc:
+            idp_result = {"error": f"{exc.status}: {exc.detail}"}
+    return {"ok": True, "idp": idp_result}
 
 
 @app.post("/agents/{agent_id}/heartbeat")
