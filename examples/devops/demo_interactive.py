@@ -21,6 +21,10 @@ import os
 import sys
 import time
 import uuid
+from pathlib import Path
+
+# Run from anywhere: add the repo root (…/agent-platform) to the import path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from control_plane.client import ControlPlaneClient
 
